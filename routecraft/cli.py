@@ -26,3 +26,6 @@ def main() -> None:
         left, right = (part.strip() for part in args.link.split(",", maxsplit=1))
         print(json.dumps(analyze(topology, frozenset((left, right))), indent=2))
 
+
+if __name__ == "__main__":
+    main()

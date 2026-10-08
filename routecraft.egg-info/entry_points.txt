@@ -1,0 +1,2 @@
+[console_scripts]
+routecraft = routecraft.cli:main

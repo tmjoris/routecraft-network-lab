@@ -1,0 +1,15 @@
+nodes:
+  - name: edge-dub
+  - name: core-a
+  - name: core-b
+  - name: dc-dub-1
+links:
+  - {left: edge-dub, right: core-a, protocol: BGP, cost: 5}
+  - {left: core-a, right: core-b, protocol: OSPF, cost: 10}
+  - {left: core-b, right: dc-dub-1, protocol: OSPF, cost: 10}
+  - {left: core-a, right: dc-dub-1, protocol: OSPF, cost: 30}
+bgp_peers:
+  - {local: edge-dub, remote: core-a}
+prefixes:
+  - {prefix: 10.10.0.0/16, origin: dc-dub-1}
+

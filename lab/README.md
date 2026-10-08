@@ -1,8 +1,9 @@
 # RouteCraft live FRRouting lab
 
-This directory describes the live part of RouteCraft. It uses the
+This directory describes the intended live part of RouteCraft. It uses the
 `docker-compose.yml` file in the repository root and FRRouting containers to
-form real control-plane adjacencies.
+form control-plane adjacencies when the configuration is started and verified
+on a Docker-capable host.
 
 ## What the lab is intended to demonstrate
 
@@ -14,7 +15,9 @@ form real control-plane adjacencies.
 
 It is not a traffic generator, a hardware emulator, or a production
 configuration. The lab is small so that a person can inspect every interface,
-neighbor, and route.
+neighbor, and route. Docker is unavailable in the development environment,
+so the live convergence commands below are a verification procedure rather
+than a claim that live adjacencies have already been observed.
 
 ## Before starting
 

@@ -36,8 +36,6 @@ services:
         ipv4_address: 172.30.2.2
       core_b_dc:
         ipv4_address: 172.30.3.1
-      core_b_edge:
-        ipv4_address: 172.30.5.1
     command: ["/usr/lib/frr/docker-start"]
 
   dc:
@@ -62,5 +60,3 @@ networks:
     ipam: {config: [{subnet: 172.30.3.0/30}]}
   core_a_dc:
     ipam: {config: [{subnet: 172.30.4.0/30}]}
-  core_b_edge:
-    ipam: {config: [{subnet: 172.30.5.0/30}]}

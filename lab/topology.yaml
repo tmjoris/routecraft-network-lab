@@ -1,0 +1,18 @@
+# Model of the live FRRouting lab in docker-compose.yml.
+# Costs mirror the "ip ospf cost" values in lab/frr/*/frr.conf;
+# tests/test_lab_config.py fails if the two drift apart.
+nodes:
+  - name: edge
+  - name: core-a
+  - name: core-b
+  - name: dc
+links:
+  - {left: edge, right: core-a, protocol: BGP, cost: 5}
+  - {left: core-a, right: core-b, protocol: OSPF, cost: 10}
+  - {left: core-b, right: dc, protocol: OSPF, cost: 10}
+  - {left: core-a, right: dc, protocol: OSPF, cost: 30}
+bgp_peers:
+  - {local: edge, remote: core-a}
+prefixes:
+  - {prefix: 10.10.0.0/16, origin: dc}
+  - {prefix: 192.0.2.0/24, origin: edge}

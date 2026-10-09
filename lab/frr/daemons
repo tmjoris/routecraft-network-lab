@@ -1,4 +1,14 @@
-zebra=yes
+# FRR daemons started by watchfrr in every lab node.
+# zebra, mgmtd and staticd are always started by the FRR image.
 bgpd=yes
 ospfd=yes
+bfdd=yes
 vtysh_enable=yes
+
+# Bind each daemon's management vty to loopback only.
+zebra_options="  -A 127.0.0.1 -s 90000000"
+mgmtd_options="  -A 127.0.0.1"
+bgpd_options="   -A 127.0.0.1"
+ospfd_options="  -A 127.0.0.1"
+staticd_options="-A 127.0.0.1"
+bfdd_options="   -A 127.0.0.1"

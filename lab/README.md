@@ -1,144 +1,126 @@
-# RouteCraft live FRRouting lab
+# RouteCraft live FRRouting lab: manual walkthrough
 
-This directory describes the intended live part of RouteCraft. It uses the
-`docker-compose.yml` file in the repository root and FRRouting containers to
-form control-plane adjacencies when the configuration is started and verified
-on a Docker-capable host.
+`lab/labctl` automates everything below. This page shows the raw commands, so
+you can see what each step does and adapt it. Run them from the repository root.
 
-## What the lab is intended to demonstrate
+## What the lab demonstrates
 
-- eBGP between `edge` (AS 65001) and `core-a` (AS 65000);
-- OSPF inside AS 65000;
-- a directly connected loopback prefix on `dc`;
-- route propagation through the core;
-- the effect of removing one Docker network from the topology.
+- eBGP between `edge` (AS 65001) and `core-a` (AS 65000), with policy in both
+  directions;
+- OSPF inside AS 65000 carrying loopbacks, plus iBGP between loopbacks carrying
+  service prefixes;
+- BFD-driven sub-second failure detection;
+- traffic rerouting over the backup link when the core link fails, and
+  returning when it is restored.
 
-It is not a traffic generator, a hardware emulator, or a production
-configuration. The lab is small so that a person can inspect every interface,
-neighbor, and route. Docker is unavailable in the development environment,
-so the live convergence commands below are a verification procedure rather
-than a claim that live adjacencies have already been observed.
+The lab is small, so you can inspect every interface, neighbor and route. It
+is not a traffic generator, a hardware emulator or a production configuration.
 
-## Before starting
-
-Install Docker Engine and the Docker Compose plugin. Confirm both commands
-work:
+## Start
 
 ```bash
-docker version
-docker compose version
+lab/labctl check            # prerequisites; see "Troubleshooting" if this fails
+docker compose up -d --wait # containers healthy = daemons answering
+lab/labctl wait             # adjacencies up and forwarding tables stable (~20 s)
 ```
 
-The first run downloads `quay.io/frrouting/frr:10.2.1`. Image availability,
-container privileges, and FRR startup behavior depend on the local Docker
-installation. None of those conditions can be inferred from the repository
-files alone.
+The first run downloads `quay.io/frrouting/frr:10.7.1`, about 190 MB.
 
-## Start and inspect
-
-From the repository root:
-
-```bash
-docker compose up -d
-docker compose ps
-```
-
-Check that the daemons started:
-
-```bash
-docker compose logs edge
-docker compose logs core-a
-docker compose exec edge vtysh -c 'show version'
-```
-
-Check the intended control plane:
+## Inspect the control plane
 
 ```bash
 docker compose exec core-a vtysh -c 'show ip ospf neighbor'
-docker compose exec core-b vtysh -c 'show ip ospf neighbor'
-docker compose exec edge vtysh -c 'show ip bgp summary'
-docker compose exec dc vtysh -c 'show ip route ospf'
+docker compose exec core-a vtysh -c 'show bgp ipv4 unicast summary'
+docker compose exec core-a vtysh -c 'show bfd peers brief'
+docker compose exec edge   vtysh -c 'show ip route bgp'
 ```
 
-For each command, compare the result with the expected topology. Do not infer
-that an adjacency exists merely because the container is running.
+What you should see:
 
-## Troubleshooting interface names
+| Router | OSPF neighbors (Full) | BGP sessions (Established) |
+|---|---|---|
+| edge | none | 172.30.0.1 (core-a) |
+| core-a | 10.255.0.3, 10.255.0.4 | 172.30.0.0 (edge), 10.255.0.3, 10.255.0.4 |
+| core-b | 10.255.0.2, 10.255.0.4 | 10.255.0.2, 10.255.0.4 |
+| dc | 10.255.0.2, 10.255.0.3 | 10.255.0.2, 10.255.0.3 |
 
-The FRR configuration refers to `eth0`, `eth1`, and `eth2`. Docker normally
-assigns interfaces in network declaration order, but that is an operational
-assumption that must be checked:
+`edge` should learn exactly one route, `10.10.0.0/16`. It should learn none of
+the `10.255.0.x` loopbacks, because the export policy keeps infrastructure
+private.
+
+## Inspect interfaces
 
 ```bash
 docker compose exec core-a ip -br addr
-docker compose exec core-b ip -br addr
-docker compose exec dc ip -br addr
 ```
 
-The expected addresses are:
+```text
+lo               UNKNOWN        127.0.0.1/8 10.255.0.2/32 ...
+to-core-b@if29   UP             172.30.0.2/31
+to-dc@if32       UP             172.30.0.6/31
+to-edge@if35     UP             172.30.0.1/31
+```
 
-| Node | Interface | Address |
-|---|---|---|
-| edge | eth0 | `172.30.1.1/30` |
-| core-a | eth0 | `172.30.1.2/30` |
-| core-a | eth1 | `172.30.2.1/30` |
-| core-a | eth2 | `172.30.4.1/30` |
-| core-b | eth0 | `172.30.2.2/30` |
-| core-b | eth1 | `172.30.3.1/30` |
-| dc | eth0 | `172.30.3.2/30` |
-| dc | eth1 | `172.30.4.2/30` |
+Interface names are set by `interface_name` in `docker-compose.yml`, so they
+are the same on every host.
 
-If the addresses do not match, stop and correct the container configuration
-before interpreting routing output.
+## Data plane
+
+```bash
+docker compose exec edge ping -c 3 -I 192.0.2.1 10.10.0.1
+docker compose exec edge traceroute -n -s 192.0.2.1 10.10.0.1
+```
+
+Always source traffic from `192.0.2.1`. The link address `172.30.0.0` is not
+announced, so replies to it have no route back. That is intentional.
 
 ## Failure experiment
 
-The direct `core-a` to `core-b` link is a Docker network. Compose usually
-prefixes its name with the project name, so discover it instead of guessing:
+Take the core-a ↔ core-b link down on both ends, like a cut cable:
 
 ```bash
-docker network ls --format '{{.Name}}' | grep core_a_core_b
+docker compose exec core-a ip link set to-core-b down
+docker compose exec core-b ip link set to-core-a down
 ```
 
-Inspect membership before changing it:
+Then observe:
 
 ```bash
-docker network inspect <network-name>
+docker compose exec dc vtysh -c 'show ip route 192.0.2.0/24'   # next hop now via to-core-a
+docker compose exec edge traceroute -n -s 192.0.2.1 10.10.0.1  # core-a -> dc directly
+docker compose exec core-a vtysh -c 'show bgp ipv4 unicast summary'  # iBGP stayed up
 ```
 
-Disconnect both endpoints:
+The iBGP sessions do not flap, because they run between loopbacks and OSPF
+re-routes the loopbacks over the backup link.
+
+To take down only one end and watch BFD detect the failure on the other end,
+run just the first command, then run `show ip ospf neighbor` on core-b. The
+adjacency to core-a disappears within about a second. Without BFD it would
+take the 40 s OSPF dead interval.
+
+Restore:
 
 ```bash
-docker network disconnect <network-name> core-a
-docker network disconnect <network-name> core-b
+docker compose exec core-a ip link set to-core-b up
+docker compose exec core-b ip link set to-core-a up
 ```
 
-Then inspect the resulting state:
+OSPF re-forms the adjacency on the next hello, within about 10 s, and traffic
+returns to core-b.
 
-```bash
-docker compose exec core-a vtysh -c 'show ip ospf neighbor'
-docker compose exec core-a vtysh -c 'show ip route'
-docker compose exec dc vtysh -c 'show ip route 10.10.0.1/32'
-```
+## Troubleshooting
 
-The expected learning outcome is that the OSPF adjacency over the disconnected
-link disappears and the remaining path is evaluated. The exact convergence
-timing and route output must be observed on the running lab; they are not
-guaranteed by this document.
-
-Reset rather than manually guessing how to reconnect:
-
-```bash
-docker compose down
-docker compose up -d
-```
+| Symptom | Cause and fix |
+|---|---|
+| `Pool overlaps with other one on this address space` | another Docker network uses `172.30.0.0/24`. `lab/labctl check` names it. |
+| Compose rejects `interface_name` | Compose is older than 2.36. Upgrade the `docker-compose-plugin` package. `lab/labctl check` reports the version. |
+| `permission denied ... docker.sock` | `sudo usermod -aG docker "$USER"`, then log out and back in |
+| container `unhealthy` | `docker compose logs <router>`; an FRR config error is printed at startup |
+| `Network unreachable`, or an unexpected path, right after start | routing has not converged yet. Run `lab/labctl wait`. |
 
 ## Cleanup
 
 ```bash
 docker compose down
 ```
-
-The Compose networks use private `172.30.0.0/16` subnets and are intended to
-remain isolated from the host network. Review `docker network inspect` if the
-environment has overlapping private address ranges.

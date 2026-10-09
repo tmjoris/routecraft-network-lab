@@ -1,0 +1,250 @@
+#!/usr/bin/env bash
+# labctl: start, inspect, break and repair the RouteCraft FRRouting lab.
+# Run `lab/labctl help` for usage. Works from any directory.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+NODES=(edge core-a core-b dc)
+LAB_SUBNET="172.30.0"
+MIN_COMPOSE="2.36.0"
+
+die() { echo "labctl: error: $*" >&2; exit 1; }
+info() { echo "==> $*"; }
+compose() { docker compose --project-directory "$ROOT" -f "$ROOT/docker-compose.yml" "$@"; }
+
+usage() {
+  cat <<'EOF'
+Usage: lab/labctl <command> [args]
+
+  check                 verify Docker, Compose and address space before starting
+  up                    start the lab and wait until routing has converged
+  wait                  wait for convergence (after a plain `docker compose up`)
+  status                OSPF, BGP and BFD state on every router
+  path                  traceroute edge -> dc service and back
+  fail-link A B         take the link between routers A and B down (both ends)
+  restore-link A B      bring that link back up and wait for reconvergence
+  shell NODE            open vtysh on a router (e.g. lab/labctl shell core-a)
+  logs [NODE]           show daemon logs
+  down                  stop the lab and remove its networks
+
+Routers: edge core-a core-b dc. Links: edge-core-a, core-a-core-b, core-b-dc, core-a-dc.
+EOF
+}
+
+version_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]; }
+
+check() {
+  command -v docker >/dev/null || die "docker is not installed. See https://docs.docker.com/engine/install/"
+  if ! docker info >/dev/null 2>&1; then
+    if docker info 2>&1 | grep -qi "permission denied"; then
+      die "cannot talk to the Docker daemon (permission denied). Add yourself to the docker group:
+  sudo usermod -aG docker \"\$USER\"   then log out and back in"
+    fi
+    die "the Docker daemon is not running. Try: sudo systemctl start docker"
+  fi
+  docker compose version >/dev/null 2>&1 \
+    || die "the Docker Compose plugin is missing. Install docker-compose-plugin."
+  local have
+  have="$(docker compose version --short | sed 's/^v//')"
+  version_ge "$have" "$MIN_COMPOSE" \
+    || die "Docker Compose $have is too old; the lab needs $MIN_COMPOSE+ for fixed interface names."
+
+  # The lab's links need isolated (address-less) bridges. Probe for engine
+  # support directly rather than guessing which release added it.
+  local probe="routecraft-lab-probe-$$" err
+  if err="$(docker network create --internal \
+        -o com.docker.network.bridge.gateway_mode_ipv4=isolated "$probe" 2>&1)"; then
+    docker network rm "$probe" >/dev/null
+  else
+    die "this Docker Engine cannot create isolated internal networks (needs a recent
+Docker Engine; tested with 29.x). Docker said: $err"
+  fi
+
+  # Another Docker network or a host route overlapping the lab range makes
+  # startup fail with an unhelpful "Pool overlaps" error, so catch it here.
+  local clash
+  clash="$(
+    { docker network ls -q | xargs -r docker network inspect \
+        --format '{{.Name}}{{range .IPAM.Config}} {{.Subnet}}{{end}}' | grep -v '^routecraft-lab_'
+      ip -4 route show 2>/dev/null | awk '$1 ~ /\// {print "host-route " $1}'
+    } | python3 -c '
+import ipaddress, sys
+lab = ipaddress.ip_network(sys.argv[1])
+for line in sys.stdin:
+    name, *subnets = line.split()
+    for subnet in subnets:
+        try:
+            net = ipaddress.ip_network(subnet, strict=False)
+        except ValueError:
+            continue
+        if net.version == 4 and net.overlaps(lab):
+            print(f"  {name} {subnet}")
+' "$LAB_SUBNET.0/24"
+  )" || die "python3 is required for the address-space check"
+  [ -z "$clash" ] || die "these already use addresses in the lab range $LAB_SUBNET.0/24:
+$clash
+Remove the Docker network (docker network rm <name>) or disconnect the VPN, then retry."
+  info "Docker $(docker version --format '{{.Server.Version}}'), Compose $have: ready"
+}
+
+require_running() {
+  local running
+  running="$(compose ps --status running --services 2>/dev/null || true)"
+  for node in "${NODES[@]}"; do
+    grep -qx "$node" <<<"$running" || die "the lab is not running. Start it with: lab/labctl up"
+  done
+}
+
+require_node() {
+  local n
+  for n in "${NODES[@]}"; do [ "$n" = "$1" ] && return 0; done
+  die "unknown router '$1' (expected one of: ${NODES[*]})"
+}
+
+set_link() {
+  local action="$1" state=up
+  shift
+  [ $# -eq 2 ] || die "usage: lab/labctl $action-link ROUTER_A ROUTER_B"
+  local a="$1" b="$2"
+  require_node "$a"; require_node "$b"
+  require_running
+  compose exec -T "$a" ip link show "to-$b" >/dev/null 2>&1 \
+    || die "there is no link between $a and $b"
+  [ "$action" = fail ] && state=down
+  compose exec -T "$a" ip link set "to-$b" "$state"
+  compose exec -T "$b" ip link set "to-$a" "$state"
+  info "link $a <-> $b is $state"
+  if [ "$state" = down ]; then
+    echo "BFD detects this in under a second. Try: lab/labctl path"
+  else
+    echo "OSPF re-forms the adjacency on its next hello (up to 10s)."
+    wait_converged 90
+  fi
+}
+
+# Expected steady state per router: "<Full OSPF neighbors> <Established BGP sessions>".
+declare -A EXPECTED=([edge]="0 1" [core-a]="2 3" [core-b]="2 2" [dc]="2 2")
+
+converged() {
+  local node want have
+  for node in "${NODES[@]}"; do
+    want="${EXPECTED[$node]}"
+    have="$(compose exec -T "$node" vtysh \
+        -c 'show ip ospf neighbor json' -c 'show bgp ipv4 unicast summary json' 2>/dev/null \
+      | python3 -c '
+import json, sys
+text = sys.stdin.read()
+ospf, bgp = json.JSONDecoder().raw_decode(text)[0], None
+rest = text[json.JSONDecoder().raw_decode(text)[1]:].strip()
+bgp = json.loads(rest) if rest else {}
+full = sum(
+    1 for entries in ospf.get("neighbors", {}).values()
+    if any(e.get("nbrState", "").startswith("Full") for e in entries)
+)
+up = sum(1 for p in bgp.get("peers", {}).values() if p.get("state") == "Established")
+print(full, up)
+' 2>/dev/null)" || return 1
+    [ "$have" = "$want" ] || return 1
+  done
+  # Sessions are up; also require the service routes to be installed.
+  [ -n "$(compose exec -T edge ip route show 10.10.0.0/16)" ] \
+    && [ -n "$(compose exec -T dc ip route show 192.0.2.0/24)" ]
+}
+
+# Every router's forwarding table, to tell when SPF and BGP have stopped changing.
+fib_snapshot() {
+  local node
+  for node in "${NODES[@]}"; do
+    echo "## $node"
+    compose exec -T "$node" ip -4 route show
+  done
+}
+
+wait_converged() {
+  require_running
+  local timeout="${1:-90}" settle=5 start=$SECONDS stable_since="" last="" now
+  printf '==> waiting for OSPF, BGP and forwarding to converge '
+  while :; do
+    if [ $((SECONDS - start)) -ge "$timeout" ]; then
+      echo
+      die "routing did not converge within ${timeout}s. Inspect with: lab/labctl status"
+    fi
+    if converged; then
+      # Adjacencies come up before the last SPF/BGP best-path run; require the
+      # forwarding tables to stay unchanged for $settle seconds.
+      now="$(fib_snapshot)"
+      if [ "$now" != "$last" ]; then
+        last="$now"
+        stable_since=$SECONDS
+      elif [ $((SECONDS - stable_since)) -ge "$settle" ]; then
+        break
+      fi
+    else
+      last=""
+    fi
+    printf '.'
+    sleep 1
+  done
+  echo " done in $((SECONDS - start))s"
+}
+
+status() {
+  require_running
+  for node in "${NODES[@]}"; do
+    echo "################ $node"
+    compose exec -T "$node" vtysh \
+      -c 'show ip ospf neighbor' -c 'show bgp ipv4 unicast summary' -c 'show bfd peers brief' \
+      | grep -vE '^\s*$'
+  done
+}
+
+# Interface and service addresses -> router names, for readable traceroutes.
+declare -A HOP_NAMES=(
+  [172.30.0.0]=edge [172.30.0.1]=core-a [172.30.0.2]=core-a [172.30.0.3]=core-b
+  [172.30.0.4]=core-b [172.30.0.5]=dc [172.30.0.6]=core-a [172.30.0.7]=dc
+  [10.10.0.1]=dc [192.0.2.1]=edge
+)
+
+trace() {
+  local hop addr _
+  compose exec -T "$1" traceroute -n -q 1 -w 1 -m 8 -s "$2" "$3" 2>&1 | tail -n +2 \
+    | while read -r hop addr _; do
+        printf '  %-3s %-12s %s\n' "$hop" "$addr" "${HOP_NAMES[$addr]:-}"
+      done
+}
+
+path() {
+  require_running
+  info "edge (192.0.2.1) -> dc service (10.10.0.1)"
+  trace edge 192.0.2.1 10.10.0.1
+  info "dc service (10.10.0.1) -> edge (192.0.2.1)"
+  trace dc 10.10.0.1 192.0.2.1
+}
+
+cmd="${1:-help}"
+shift || true
+case "$cmd" in
+  check) check ;;
+  up)
+    check
+    info "starting the lab (first run downloads the FRR image)"
+    compose up -d --wait \
+      || die "a router failed its health check. Inspect with: lab/labctl logs"
+    wait_converged 90
+    info "lab is up. Next: lab/labctl status, lab/labctl path"
+    ;;
+  wait) wait_converged "$@" ;;
+  status) status ;;
+  path) path ;;
+  fail-link) set_link fail "$@" ;;
+  restore-link) set_link restore "$@" ;;
+  shell)
+    [ $# -eq 1 ] || die "usage: lab/labctl shell ROUTER"
+    require_node "$1"; require_running
+    compose exec "$1" vtysh
+    ;;
+  logs) compose logs "$@" ;;
+  down) compose down ;;
+  help | -h | --help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac

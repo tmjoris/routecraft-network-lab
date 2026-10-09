@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: python -m pip install -e '.[dev]'
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy
+      - run: pytest --cov
+      - name: CLI smoke test
+        run: |
+          routecraft validate examples/metro.yaml
+          routecraft validate lab/topology.yaml
+          routecraft simulate-failure lab/topology.yaml --link core-a,core-b
+          routecraft resilience lab/topology.yaml
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck lab/labctl
+
+  lab:
+    name: Live FRRouting lab
+    needs: python
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -e '.[dev]'
+      - run: docker compose version
+      - run: lab/labctl up
+      - run: lab/labctl status
+      - run: pytest -m lab -v
+      - name: Router logs
+        if: failure()
+        run: lab/labctl logs
+      - name: Tear down
+        if: always()
+        run: lab/labctl down

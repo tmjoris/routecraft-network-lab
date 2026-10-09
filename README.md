@@ -258,8 +258,9 @@ Python 3.12, starting from a fresh clone:
   - BFD-driven reroute on link failure;
   - recovery.
 
+The same live suite also passes in CI on a GitHub-hosted Ubuntu runner.
+
 Not verified yet:
-- the GitHub Actions workflow, which runs on the first push;
 - Docker Desktop on macOS or Windows;
 - rootless Docker;
 - Podman.

@@ -32,7 +32,7 @@ docker-compose.yml + frr.conf -> FRRouting lab -> live paths  (pytest -m lab)
 Requirements:
 
 - **Python 3.11+** with `venv`. On Debian or Ubuntu that means `sudo apt install python3-venv`.
-- **For the live lab:** Docker Engine (tested on 29.8) with the Compose plugin v2.36+,
+- **For the live lab:** Docker Engine 28.1+ (tested on 29.8) with the Compose plugin v2.36+,
   on Linux. Your user must be able to run `docker` without `sudo`.
 
 ```bash
@@ -198,7 +198,7 @@ Other commands: `check`, `status` (OSPF, BGP and BFD on every router),
 `check`, which `up` runs first, catches the usual reasons a lab fails to start:
 - Docker is not installed, or the daemon is not running;
 - no permission to use the Docker socket;
-- Compose is too old;
+- Docker Engine or Compose is too old for fixed interface names;
 - the Docker Engine lacks isolated networks;
 - another Docker network, VPN or route already uses `172.30.0.0/24`.
 

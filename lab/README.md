@@ -114,7 +114,7 @@ returns to core-b.
 | Symptom | Cause and fix |
 |---|---|
 | `Pool overlaps with other one on this address space` | another Docker network uses `172.30.0.0/24`. `lab/labctl check` names it. |
-| Compose rejects `interface_name` | Compose is older than 2.36. Upgrade the `docker-compose-plugin` package. `lab/labctl check` reports the version. |
+| `interface_name requires Docker Engine v28.1 or later` | upgrade Docker Engine. Compose 2.36+ is also required. `lab/labctl check` reports both versions. |
 | `permission denied ... docker.sock` | `sudo usermod -aG docker "$USER"`, then log out and back in |
 | container `unhealthy` | `docker compose logs <router>`; an FRR config error is printed at startup |
 | `Network unreachable`, or an unexpected path, right after start | routing has not converged yet. Run `lab/labctl wait`. |

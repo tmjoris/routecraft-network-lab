@@ -9,7 +9,7 @@
 # Every link is a /31 point-to-point Docker network (RFC 3021) with no host
 # gateway, so the host is never part of the lab's routing domain. Interface
 # names are fixed per link (to-<peer>) instead of depending on Docker's ethN
-# ordering. Requires Docker Compose v2.36 or newer for interface_name.
+# ordering. interface_name needs Docker Engine 28.1+ and Compose 2.36+.
 
 name: routecraft-lab
 

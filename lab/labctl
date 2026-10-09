@@ -7,6 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NODES=(edge core-a core-b dc)
 LAB_SUBNET="172.30.0"
 MIN_COMPOSE="2.36.0"
+MIN_ENGINE="28.1.0"  # first release supporting per-network interface_name
 
 die() { echo "labctl: error: $*" >&2; exit 1; }
 info() { echo "==> $*"; }
@@ -44,6 +45,11 @@ check() {
   fi
   docker compose version >/dev/null 2>&1 \
     || die "the Docker Compose plugin is missing. Install docker-compose-plugin."
+  local engine
+  engine="$(docker version --format '{{.Server.Version}}')"
+  version_ge "$engine" "$MIN_ENGINE" \
+    || die "Docker Engine $engine is too old; the lab needs $MIN_ENGINE+ for fixed interface names.
+Upgrade Docker Engine: https://docs.docker.com/engine/install/"
   local have
   have="$(docker compose version --short | sed 's/^v//')"
   version_ge "$have" "$MIN_COMPOSE" \
@@ -84,7 +90,7 @@ for line in sys.stdin:
   [ -z "$clash" ] || die "these already use addresses in the lab range $LAB_SUBNET.0/24:
 $clash
 Remove the Docker network (docker network rm <name>) or disconnect the VPN, then retry."
-  info "Docker $(docker version --format '{{.Server.Version}}'), Compose $have: ready"
+  info "Docker $engine, Compose $have: ready"
 }
 
 require_running() {
@@ -229,7 +235,7 @@ case "$cmd" in
     check
     info "starting the lab (first run downloads the FRR image)"
     compose up -d --wait \
-      || die "a router failed its health check. Inspect with: lab/labctl logs"
+      || die "docker compose up failed (see the message above). Router logs: lab/labctl logs"
     wait_converged 90
     info "lab is up. Next: lab/labctl status, lab/labctl path"
     ;;
